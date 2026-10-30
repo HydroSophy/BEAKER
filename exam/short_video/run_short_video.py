@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""Run short-video QA by uniformly sampling 8 frames from each video."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from openai import OpenAI
+
+from model_settings import (
+    DEFAULT_LOCAL_MODEL,
+    DEFAULT_OPENAI_MODEL,
+    LOCAL_API_KEY,
+    LOCAL_BASE_URL,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    make_openai_client,
+)
+from request_limits import (
+    API_ERRORS,
+    ApiFailureGuard,
+    add_max_output_tokens_argument,
+    completion_token_kwargs,
+    count_api_failures,
+    extra_body_kwargs,
+    image_url_payload,
+    parse_choice_answer,
+    response_text,
+    resumable_results,
+    save_results,
+    should_retry,
+    temperature_kwargs,
+)
+
+
+SOURCE_FILES = [
+    "video/Temporal_Sequence_Reasoning/short_Temporal_Sequence_Reasoning.json",
+    "video/Short-Video_Operation_Reasoning/Short-Video_Operation_Reasoning.json",
+]
+VIDEO_ROOT = "video/video_data/short"
+FRAME_COUNT = 8
+CHOICES = {"A", "B", "C", "D"}
+
+PROMPT_TEMPLATE = """These 8 frames come from one short chemistry-lab video in time order.
+Choose one option using only the frames.
+No reasoning. No explanation. Output exactly one JSON object: {{"answer":"A"}}.
+Question: {question}
+Options:
+A. {option_a}
+B. {option_b}
+C. {option_c}
+D. {option_d}
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run short-video QA with 8 sampled frames.")
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent.parent,
+        help="Dataset root directory.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "answer",
+        help="Directory used to store answer outputs.",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["openai", "local"],
+        default="openai",
+        help="Model provider.",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model name override.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Only run the first N questions from each source file.",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=1,
+        help="Retry count for failed API calls.",
+    )
+    parser.add_argument(
+        "--sleep-seconds",
+        type=float,
+        default=0.1,
+        help="Delay between requests.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting an existing output file.",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip questions that already exist in the output file.",
+    )
+    add_max_output_tokens_argument(parser, default=16)
+    return parser
+
+
+def build_result_key(filename: Any, question: Any) -> str:
+    return f"{filename}\n{question}"
+
+
+def resolve_model(provider: str, override: str | None) -> str:
+    if override:
+        return override
+    if provider == "openai":
+        return DEFAULT_OPENAI_MODEL
+    return DEFAULT_LOCAL_MODEL
+
+
+def load_client(provider: str) -> OpenAI:
+    if provider == "openai":
+        return make_openai_client(OPENAI_API_KEY, OPENAI_BASE_URL)
+    if provider == "local":
+        if not LOCAL_BASE_URL.strip():
+            raise RuntimeError("Missing LOCAL_BASE_URL in exam/model_settings.py.")
+        return OpenAI(
+            api_key=LOCAL_API_KEY.strip() or "EMPTY",
+            base_url=LOCAL_BASE_URL.strip(),
+        )
+    raise ValueError(f"Unsupported provider: {provider}")
+
+
+def format_seconds(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def probe_duration(video_path: Path) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return float(result.stdout.strip())
+
+
+def sample_timestamps(duration: float, frame_count: int) -> list[float]:
+    if duration <= 0:
+        return [0.0] * frame_count
+    step = duration / frame_count
+    return [min(duration, step * i + step / 2) for i in range(frame_count)]
+
+
+def extract_frames(video_path: Path, frame_count: int) -> list[Path]:
+    duration = probe_duration(video_path)
+    timestamps = sample_timestamps(duration, frame_count)
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"{video_path.stem}_frames_"))
+    frame_paths: list[Path] = []
+    try:
+        for idx, ts in enumerate(timestamps, start=1):
+            out_path = temp_dir / f"frame_{idx:02d}.jpg"
+            last_error: Exception | None = None
+            for attempt_ts in (ts, max(0.0, ts - 0.25), max(0.0, ts - 0.5), max(0.0, ts - 1.0)):
+                try:
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-ss",
+                            f"{attempt_ts:.3f}",
+                            "-i",
+                            str(video_path),
+                            "-frames:v",
+                            "1",
+                            "-q:v",
+                            "2",
+                            str(out_path),
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                    last_error = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+            if last_error is not None:
+                raise last_error
+            frame_paths.append(out_path)
+        return frame_paths
+    except Exception:  # noqa: BLE001
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
+def frame_to_data_url(path: Path) -> str:
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def build_prompt(item: dict[str, Any]) -> str:
+    options = item.get("options", [])
+    if len(options) != 4:
+        raise ValueError(f"Question {item.get('question_id')} does not have 4 options.")
+    return PROMPT_TEMPLATE.format(
+        question=item.get("question", ""),
+        option_a=options[0],
+        option_b=options[1],
+        option_c=options[2],
+        option_d=options[3],
+    )
+
+
+def parse_answer(raw: str) -> str | None:
+    text = raw.strip()
+    return parse_choice_answer(text, CHOICES)
+
+
+def ask_model(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    frame_paths: list[Path],
+    retries: int,
+    provider: str,
+    max_output_tokens: int,
+) -> str | None:
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for frame_path in frame_paths:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": image_url_payload(frame_to_data_url(frame_path)),
+            }
+        )
+
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": content}],
+                **completion_token_kwargs(provider, max_output_tokens),
+                **temperature_kwargs(),
+                **extra_body_kwargs(),
+            )
+            raw = response_text(response)
+            answer = parse_answer(raw)
+            if answer is None:
+                raise ValueError(f"Could not parse choice from model output: {raw}")
+            return answer
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt == retries or not should_retry(exc):
+                break
+            time.sleep(min(2 * attempt, 5))
+    assert last_error is not None
+    if isinstance(last_error, API_ERRORS):
+        raise last_error
+    print(f"[warn] {last_error}", file=sys.stderr, flush=True)
+    return None
+
+
+def process_source_file(
+    client: OpenAI,
+    model: str,
+    source_path: Path,
+    video_root: Path,
+    output_path: Path,
+    limit: int | None,
+    retries: int,
+    sleep_seconds: float,
+    skip_existing: bool,
+    provider: str,
+    max_output_tokens: int,
+    guard: ApiFailureGuard,
+) -> None:
+    data = json.loads(source_path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError(f"{source_path} is not a JSON array.")
+    if limit is not None:
+        data = data[:limit]
+
+    print(f"[file] {source_path} items={len(data)}", flush=True)
+    results: list[dict[str, Any]] = []
+    completed_keys: set[str] = set()
+    if output_path.exists() and skip_existing:
+        existing = json.loads(output_path.read_text(encoding="utf-8"))
+        if not isinstance(existing, list):
+            raise ValueError(f"{output_path} is not a JSON array.")
+        results = resumable_results(existing)
+        completed_keys = {
+            build_result_key(item.get("filename"), item.get("question"))
+            for item in results
+        }
+    started_at = time.time()
+
+    for index, item in enumerate(data, start=1):
+        item_key = build_result_key(item.get("filename"), item.get("question"))
+        if item_key in completed_keys:
+            elapsed = time.time() - started_at
+            avg = elapsed / index if index else 0
+            remaining = len(data) - index
+            eta = avg * remaining
+            print(
+                "[progress] "
+                f"item={index}/{len(data)} "
+                f"status=skipped "
+                f"elapsed={format_seconds(elapsed)} "
+                f"eta={format_seconds(eta)}",
+                flush=True,
+            )
+            continue
+        video_path = video_root / item["filename"]
+        if not video_path.exists():
+            raise FileNotFoundError(f"Missing video: {video_path}")
+        prompt = build_prompt(item)
+        item_started_at = time.time()
+        frame_paths = extract_frames(video_path, FRAME_COUNT)
+        api_error: Exception | None = None
+        try:
+            model_answer = ask_model(
+                client,
+                model,
+                prompt,
+                frame_paths,
+                retries,
+                provider,
+                max_output_tokens,
+            )
+        except API_ERRORS as exc:
+            model_answer, api_error = None, exc
+            print(f"[warn] API request failed: {exc}", file=sys.stderr, flush=True)
+        finally:
+            if frame_paths:
+                shutil.rmtree(frame_paths[0].parent, ignore_errors=True)
+
+        row = {
+            "filename": item.get("filename"),
+            "question": item.get("question"),
+            "answer": item.get("answer"),
+            "model_answer": model_answer,
+        }
+        if api_error is not None:
+            row["api_error"] = str(api_error)
+        results.append(row)
+        completed_keys.add(item_key)
+        save_results(output_path, results)
+        guard.record(api_error)
+
+        elapsed = time.time() - started_at
+        avg = elapsed / index if index else 0
+        remaining = len(data) - index
+        eta = avg * remaining
+        print(
+            "[progress] "
+            f"item={index}/{len(data)} "
+            f"item_time={format_seconds(time.time() - item_started_at)} "
+            f"elapsed={format_seconds(elapsed)} "
+            f"eta={format_seconds(eta)}",
+            flush=True,
+        )
+        time.sleep(sleep_seconds)
+
+    save_results(output_path, results)
+    print(
+        f"[done] output={output_path} api_failures={count_api_failures(results)}",
+        flush=True,
+    )
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    dataset_root = args.dataset_root.resolve()
+    output_root = args.output_root.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    client = load_client(args.provider)
+    model = resolve_model(args.provider, args.model)
+    video_root = dataset_root / VIDEO_ROOT
+    guard = ApiFailureGuard()
+
+    print(
+        f"[start] task=short_video provider={args.provider} model={model} frames={FRAME_COUNT}",
+        flush=True,
+    )
+
+    try:
+        for relative in SOURCE_FILES:
+            source_path = dataset_root / relative
+            output_path = output_root / f"{source_path.stem}_answer.json"
+            if output_path.exists() and not args.overwrite and not args.skip_existing:
+                raise FileExistsError(
+                    f"Output exists: {output_path}. Use --overwrite or --skip-existing."
+                )
+            process_source_file(
+                client=client,
+                model=model,
+                source_path=source_path,
+                video_root=video_root,
+                output_path=output_path,
+                limit=args.limit,
+                retries=args.retries,
+                sleep_seconds=args.sleep_seconds,
+                skip_existing=args.skip_existing,
+                provider=args.provider,
+                max_output_tokens=args.max_output_tokens,
+                guard=guard,
+            )
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
