@@ -17,19 +17,77 @@ card are available on
 
 ## Tasks
 
-| Task | Abbreviation | Capability | Questions |
-| --- | --- | --- | ---: |
-| Affordance Grounding | AFF | Actionability | 150 |
-| Trajectory Planning | TRAJ | Actionability | 150 |
-| Equipment and Reagent Identification | ERI | Knowledge | 60 |
-| Experimental Safety and Standardization | ESS | Knowledge | 60 |
-| State Recognition | SR | Knowledge | 60 |
-| Experimental Apparatus Setup | EAS | Experimentation | 60 |
-| Experimental Operations | EOP | Experimentation | 60 |
-| Short-Video Operation Reasoning | SVOR | Experimentation | 125 |
-| Mid-Video Task-Step Reasoning | MVTS | Experimentation | 75 |
-| Temporal Sequence Reasoning | TSR | Reasoning | 150 |
-| Long-Video Experimental Procedure Reasoning | LVPR | Reasoning | 50 |
+<table>
+  <thead>
+    <tr>
+      <th align="center">Capability</th>
+      <th align="left">Task</th>
+      <th align="left">Abbreviation</th>
+      <th align="right">Questions</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="2" align="center" valign="middle">Actionability</td>
+      <td>Affordance Grounding</td>
+      <td>AFF</td>
+      <td align="right">150</td>
+    </tr>
+    <tr>
+      <td>Trajectory Planning</td>
+      <td>TRAJ</td>
+      <td align="right">150</td>
+    </tr>
+    <tr>
+      <td rowspan="3" align="center" valign="middle">Knowledge</td>
+      <td>Equipment and Reagent Identification</td>
+      <td>ERI</td>
+      <td align="right">60</td>
+    </tr>
+    <tr>
+      <td>Experimental Safety and Standardization</td>
+      <td>ESS</td>
+      <td align="right">60</td>
+    </tr>
+    <tr>
+      <td>State Recognition</td>
+      <td>SR</td>
+      <td align="right">60</td>
+    </tr>
+    <tr>
+      <td rowspan="4" align="center" valign="middle">Experimentation</td>
+      <td>Experimental Apparatus Setup</td>
+      <td>EAS</td>
+      <td align="right">60</td>
+    </tr>
+    <tr>
+      <td>Experimental Operations</td>
+      <td>EOP</td>
+      <td align="right">60</td>
+    </tr>
+    <tr>
+      <td>Short-Video Operation Reasoning</td>
+      <td>SVOR</td>
+      <td align="right">125</td>
+    </tr>
+    <tr>
+      <td>Mid-Video Task-Step Reasoning</td>
+      <td>MVTS</td>
+      <td align="right">75</td>
+    </tr>
+    <tr>
+      <td rowspan="2" align="center" valign="middle">Reasoning</td>
+      <td>Temporal Sequence Reasoning</td>
+      <td>TSR</td>
+      <td align="right">150</td>
+    </tr>
+    <tr>
+      <td>Long-Video Experimental Procedure Reasoning</td>
+      <td>LVPR</td>
+      <td align="right">50</td>
+    </tr>
+  </tbody>
+</table>
 
 TSR contains 70 short-video, 50 mid-video, and 30 long-video questions. Each
 image multiple-choice task contains 20 simple and 40 complex questions.
@@ -211,47 +269,6 @@ The first file contains one model's results. The second combines all evaluated
 models into one table. Before calculating summaries, the script verifies the
 expected question count for every task. Partial runs and missing task rows remain
 blank and cannot be reported as full benchmark results.
-
-## Scoring
-
-All reported task and capability scores are on a 0–100 scale.
-
-- MCQ tasks use exact answer accuracy.
-- AFF centers a box with each valid target box's dimensions at the predicted
-  point, calculates IoU, and uses the maximum IoU over alternative targets,
-  multiplied by 100.
-- TRAJ normalizes coordinates by image dimensions and uses discrete Fréchet
-  distance (DFD). Predicted trajectories are interpolated to the reference point
-  count. Invalid predictions receive `sqrt(2)` DFD and remain in the mean. The
-  task score is `100 × exp(-mean_DFD / 0.40)`.
-- LVPR is the average expert score over its 50 questions, multiplied by 100.
-
-The three TSR subset scores are combined as:
-
-```text
-TSR = (Short-TSR + Mid-TSR + Long-TSR) / 3
-```
-
-The four capability scores are:
-
-```text
-Actionability   = (AFF + TRAJ) / 2
-Knowledge       = (ERI + ESS + SR) / 3
-Experimentation = (2×EAS + 2×EOP + 5×SVOR + 5×MVTS) / 14
-Reasoning       = (TSR + LVPR) / 2
-```
-
-Overall is calculated from the four capability scores:
-
-```text
-Overall = 0.25×Actionability
-        + 0.15×Knowledge
-        + 0.35×Experimentation
-        + 0.25×Reasoning
-```
-
-The summary also includes `trajectory_dfd` as a diagnostic value and
-`trajectory_score` as the 0–100 TRAJ task score.
 
 ## Repository structure
 
