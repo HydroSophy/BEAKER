@@ -3,6 +3,10 @@
 **NeurIPS 2026 Spotlight** (Track on Evaluations and Datasets) ·
 [Dataset on Hugging Face](https://huggingface.co/datasets/HydroSophyTech/BEAKER)
 
+<p align="center">
+  <img src="assets/teaser.png" alt="Overview of BEAKER and key evaluation findings" width="100%">
+</p>
+
 This repository contains the official inference and evaluation code for BEAKER.
 BEAKER evaluates whether multimodal models can perceive, ground, and reason about
 operations in chemical laboratories. It contains 1,000 expert-authored questions
@@ -74,10 +78,25 @@ export OPENAI_BASE_URL="https://your-api-base-url/v1"
 Use `BEAKER_OUTPUT_NAME` to set the answer directory name. API-key and model-name
 placeholder values must be replaced before running inference.
 
-For a local OpenAI-compatible server, configure:
+The runners do not load model weights themselves; they send each question to a
+model server over HTTP. To evaluate an open-weight model on your own GPUs, first
+start a server for it with a tool such as [vLLM](https://docs.vllm.ai/), for
+example:
 
 ```bash
-export LOCAL_MODEL="your-local-model-name"
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct --port 8000 \
+  --limit-mm-per-prompt '{"image": 32}'
+```
+
+The server runs on your machine and accepts requests in the same format as the
+OpenAI API ("OpenAI-compatible"), so the runners query it in the same way as a
+hosted model. Mid-length and long-video questions send 32 images in one request,
+while vLLM accepts one image per request by default; `--limit-mm-per-prompt`
+raises this limit. Then point the runners to the server; `LOCAL_MODEL` must match
+the model name the server uses:
+
+```bash
+export LOCAL_MODEL="Qwen/Qwen2.5-VL-7B-Instruct"
 export LOCAL_BASE_URL="http://127.0.0.1:8000/v1"
 export LOCAL_API_KEY="EMPTY"
 ```
@@ -85,10 +104,6 @@ export LOCAL_API_KEY="EMPTY"
 The sampling temperature is 0.7, as in the paper, and is set by `TEMPERATURE` in
 the model configuration. Set it to `None` only for endpoints that do not accept a
 temperature parameter.
-
-`MAX_OUTPUT_TOKENS`, `TOKEN_LIMIT_PARAM`, and `EXTRA_BODY` can be set in a model
-configuration when required by an endpoint. Image requests contain only the image
-data URL and do not set a provider-specific image quality field.
 
 ## Run inference
 
@@ -209,7 +224,7 @@ All reported task and capability scores are on a 0–100 scale.
   distance (DFD). Predicted trajectories are interpolated to the reference point
   count. Invalid predictions receive `sqrt(2)` DFD and remain in the mean. The
   task score is `100 × exp(-mean_DFD / 0.40)`.
-- LVPR is the mean of the 50 expert-scored question values multiplied by 100.
+- LVPR is the average expert score over its 50 questions, multiplied by 100.
 
 The three TSR subset scores are combined as:
 
@@ -259,6 +274,8 @@ BEAKER/
 │   ├── build_score_summary.py
 │   ├── image_mcq_eval.py
 │   └── affordance_trajectory_eval.py
+├── assets/
+│   └── teaser.png
 ├── requirements.txt
 └── LICENSE
 ```
