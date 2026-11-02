@@ -317,7 +317,7 @@ If you use BEAKER, please cite:
 ```bibtex
 @inproceedings{lin2026beaker,
   title     = {{BEAKER}: An Expert-Curated Benchmark for Embodied Brains in Self-Driving Chemical Laboratories},
-  author    = {Lin, Fei and Zhang, Tengchao and Gong, Ziyang and Yu, Xiaotong and Zhang, Bohan and Zhou, Yifan and Yang, Qihao and Dai, Ji and Li, Dong and Jiang, Yining and Ni, Qinghua and Huang, Jun and Zhang, Qiang and Zhou, Yue and Zhong, Zhihang and Wang, Fei-Yue and Yang, Xue and Tian, Yonglin},
+  author    = {Lin, Fei and Zhang, Tengchao and Gong, Ziyang and Yu, Xiaotong and Zhang, Bohan and Zhou, Yifan and Yang, Qihao and Dai, Ji and Li, Dong and Jiang, Yining and Ni, Qinghua and Huang, Jun and Zhang, Qiang and Zhou, Yue and Zhong, Zhihang and Tian, Yonglin and Wang, Fei-Yue and Yang, Xue},
   booktitle = {Advances in Neural Information Processing Systems (NeurIPS), Track on Evaluations and Datasets},
   year      = {2026}
 }
